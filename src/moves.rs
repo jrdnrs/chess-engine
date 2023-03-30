@@ -1,6 +1,6 @@
 use crate::{
     bits::{clear_lsb, set_bit},
-    board::{BLACK, WHITE},
+    board::{BLACK, WHITE}, sort::selection_sort_once,
 };
 
 pub const CAPTURE: u8 = 1;
@@ -56,6 +56,34 @@ impl Move {
 
     pub fn get_en_pass_bits(&self) -> u8 {
         self.flags & Self::EN_PASSANT_MASK
+    }
+}
+
+pub struct IndexOfNextBest {
+    evals: Vec<(i32, usize)>,
+    current_index: usize,
+}
+
+impl IndexOfNextBest {
+    pub fn new(evals: Vec<(i32, usize)>) -> Self {
+        Self {
+            evals,
+            current_index: 0,
+        }
+    }
+}
+
+impl Iterator for IndexOfNextBest {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_index >= self.evals.len() {
+            return None;
+        }
+        selection_sort_once(&mut self.evals[self.current_index..]);
+        let ret = Some(self.evals[self.current_index].1);
+        self.current_index += 1;
+        return ret;
     }
 }
 

@@ -327,7 +327,7 @@ pub fn bishop_attack(square: u64, blockers: u64, rays: &Rays) -> u64 {
     return moves;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TableEntry {
     zobrist_key: u64,
     depth: u16,
@@ -336,8 +336,8 @@ pub struct TableEntry {
     best_move: Option<Move>,
 }
 
-pub struct TranspositionTable<const N: usize> {
-    transpositions: [TableEntry; N],
+pub struct TranspositionTable {
+    transpositions: Vec<TableEntry>,
 
     pieces: [[[u64; 64]; 6]; 2],
     en_passants: [u64; 64],
@@ -345,8 +345,8 @@ pub struct TranspositionTable<const N: usize> {
     colors: [u64; 2],
 }
 
-impl<const N: usize> TranspositionTable<N> {
-    pub fn new() -> Self {
+impl TranspositionTable {
+    pub fn new(size: usize) -> Self {
         let mut generator = rand::XORShift64::new(0x007FFCDDFCED714A);
         let pieces = core::array::from_fn::<_, 2, _>(|_| {
             core::array::from_fn::<_, 6, _>(|_| {
@@ -356,9 +356,10 @@ impl<const N: usize> TranspositionTable<N> {
         let en_passants = core::array::from_fn(|_| generator.rand());
         let castling_rights = core::array::from_fn(|_| generator.rand());
         let colors = core::array::from_fn(|_| generator.rand());
+        let transpositions = vec![TableEntry::default(); size];
 
         Self {
-            transpositions: core::array::from_fn(|_| TableEntry::default()),
+            transpositions,
             pieces,
             en_passants,
             castling_rights,
@@ -398,10 +399,6 @@ impl<const N: usize> TranspositionTable<N> {
     }
 
     pub fn update_zobrist_hash(&self, mut hash: u64, mov: &Move) -> u64 {
-
-
-
-
         return hash;
     }
 }

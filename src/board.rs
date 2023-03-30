@@ -164,7 +164,7 @@ impl Board {
         return Ok(());
     }
 
-    pub fn material_score(&self, color: usize) -> i32 {
+    pub fn player_score(&self, color: usize) -> i32 {
         let mut score = 0;
 
         for piece in 0..5 {

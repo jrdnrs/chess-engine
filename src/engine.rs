@@ -1,4 +1,4 @@
-use crate::{bitboard::*, bits::*, board::*, moves::*, pregen};
+use crate::{bitboard::*, bits::*, board::*, moves::*, pregen, sort::selection_sort_once};
 
 /// order: white, black
 const BACK_RANK: [u8; 2] = [0, 7];
@@ -8,8 +8,7 @@ const PENULT_RANK: [u8; 2] = [6, 1];
 const CASTLE_SAFE_SQUARES: [[u64; 2]; 2] = [[0xE, 0x38], [0xE00000000000000, 0x3800000000000000]];
 const CASTLE_OPEN_SQUARES: [[u64; 2]; 2] = [[0x6, 0x70], [0x600000000000000, 0x7000000000000000]];
 
-const NEG_INF: i32 = i32::MIN + 1;
-const POS_INF: i32 = i32::MAX;
+const INFINITY: i32 = 0x0FFFFFFF;
 
 const TABLE_SIZE: usize = 2 << 5;
 const TABLE_MODULUS: usize = TABLE_SIZE - 1;
@@ -66,10 +65,12 @@ pub struct Engine {
 
     pub history: Vec<PreMoveState>,
 
+    pub depth_counter: usize,
+
     pub rays: pregen::Rays,
     pub blocker_masks: pregen::BlockerMasks,
     pub attack_sets: pregen::AttackSets,
-    pub transposition_table: pregen::TranspositionTable<TABLE_SIZE>,
+    pub transposition_table: pregen::TranspositionTable,
 }
 
 impl Engine {
@@ -77,7 +78,7 @@ impl Engine {
         let rays = pregen::Rays::new();
         let blocker_masks = pregen::BlockerMasks::new(&rays);
         let attack_sets = pregen::AttackSets::new(&rays, &blocker_masks);
-        let transposition_table = pregen::TranspositionTable::new();
+        let transposition_table = pregen::TranspositionTable::new(TABLE_SIZE);
 
         Self {
             board: Board::new(),
@@ -88,6 +89,7 @@ impl Engine {
             en_pass_check_mask: 0,
             checks: 0,
             history: Vec::new(),
+            depth_counter: 0,
             rays,
             blocker_masks,
             attack_sets,
@@ -114,52 +116,21 @@ impl Engine {
         Ok(())
     }
 
-    fn order_moves(&self, moves: &Vec<Move>) -> Vec<usize> {
-        let mut scores = Vec::with_capacity(moves.len());
-        let mut order = Vec::with_capacity(moves.len());
-
-        for (i, mov) in moves.iter().enumerate() {
-            let mut score = 0;
-            let piece;
-
-            if mov.is_promotion() {
-                piece = PAWN as i32;
-                score += mov.piece as i32;
-            } else {
-                piece = mov.piece as i32;
-            }
-
-            if mov.is_capture() {
-                let captured_piece = self
-                    .board
-                    .get_piece_on_square(self.board.enemy_color, mov.to);
-
-                score += 10 * PIECE_VALUE[captured_piece] as i32 - piece;
-            }
-
-            scores.push(score);
-            order.push(i);
-        }
-
-        order.sort_unstable_by_key(|i| scores[*i]);
-
-        return order;
-    }
-
     pub fn best_move(&mut self, depth: u16) -> Option<Move> {
         let moves = self.generate_moves();
         if moves.is_empty() {
             return None;
         }
 
-        let mut best_score = NEG_INF;
+        self.depth_counter = 0;
+        let mut best_score = -INFINITY;
         let mut best_move = &moves[0];
 
-        for i in self.order_moves(&moves) {
+        for i in IndexOfNextBest::new(self.evaluate_moves(&moves)) {
             let mov = &moves[i];
 
             self.make_move(mov);
-            let score = -self.negamax(depth - 1, -POS_INF, -best_score);
+            let score = -self.negamax(0, depth - 1, -INFINITY, -best_score);
             self.unmake_move(mov);
 
             if score > best_score {
@@ -171,24 +142,24 @@ impl Engine {
         return Some(best_move.clone());
     }
 
-    fn negamax(&mut self, depth: u16, mut alpha: i32, beta: i32) -> i32 {
-        if depth == 0 {
+    fn negamax(&mut self, from_root: u16, from_target: u16, mut alpha: i32, beta: i32) -> i32 {
+        if from_target == 0 {
             return self.quiesce(alpha, beta);
         }
 
         let moves = self.generate_moves();
         if moves.is_empty() {
             if self.checks > 0 {
-                return NEG_INF;
+                return -INFINITY + from_root as i32;
             }
             return 0;
         }
 
-        for i in self.order_moves(&moves) {
+        for i in IndexOfNextBest::new(self.evaluate_moves(&moves)) {
             let mov = &moves[i];
 
             self.make_move(mov);
-            let eval = -self.negamax(depth - 1, -beta, -alpha);
+            let eval = -self.negamax(from_root + 1, from_target - 1, -beta, -alpha);
             self.unmake_move(mov);
 
             if eval >= beta {
@@ -202,7 +173,8 @@ impl Engine {
     }
 
     fn quiesce(&mut self, mut alpha: i32, beta: i32) -> i32 {
-        let eval = self.evaluate();
+        self.depth_counter += 1;
+        let eval = self.evaluate_position();
         if eval >= beta {
             return beta;
         }
@@ -210,7 +182,8 @@ impl Engine {
 
         let moves = self.generate_moves();
 
-        for mov in moves.iter() {
+        for i in IndexOfNextBest::new(self.evaluate_moves(&moves)) {
+            let mov = &moves[i];
             if !mov.is_capture() {
                 continue;
             }
@@ -229,9 +202,39 @@ impl Engine {
         return alpha;
     }
 
-    fn evaluate(&self) -> i32 {
-        self.board.material_score(self.board.active_color)
-            - self.board.material_score(self.board.enemy_color)
+    fn evaluate_position(&self) -> i32 {
+        self.board.player_score(self.board.active_color)
+            - self.board.player_score(self.board.enemy_color)
+    }
+
+    fn evaluate_moves(&self, moves: &[Move]) -> Vec<(i32, usize)> {
+        let mut move_evals = Vec::with_capacity(moves.len());
+        for (i, mov) in moves.iter().enumerate() {
+            move_evals.push((self.evaluate_move(mov), i));
+        }
+        return move_evals;
+    }
+
+    fn evaluate_move(&self, mov: &Move) -> i32 {
+        let mut score = 0;
+        let piece;
+
+        if mov.is_promotion() {
+            piece = PAWN as i32;
+            score += mov.piece as i32;
+        } else {
+            piece = mov.piece as i32;
+        }
+
+        if mov.is_capture() {
+            let captured_piece = self
+                .board
+                .get_piece_on_square(self.board.enemy_color, mov.to);
+
+            score += 10 * PIECE_VALUE[captured_piece] as i32 - piece;
+        }
+
+        return score;
     }
 
     pub fn make_move(&mut self, mov: &Move) {
@@ -951,7 +954,7 @@ mod tests {
             let start = std::time::Instant::now();
             let nodes = perft(&mut engine, depth);
             let elapsed = start.elapsed().as_millis();
-            println!("depth: {depth}  positions: {nodes}  time: {elapsed}ms");
+            println!("depth: {depth}  nodes: {nodes}  time: {elapsed}ms");
             assert_eq!(nodes, NODES[depth as usize]);
         }
     }
@@ -960,8 +963,10 @@ mod tests {
     fn best_move_test() {
         let mut engine = Engine::new();
 
+        // "4kb1r/pp2ppp1/3p4/7p/P7/8/2r5/K2Qq3 b - - 7 52"
+
         if let Err(err) =
-            engine.load_fen("2rk2r1/p2p1p1p/1p2p3/6p1/6P1/6K1/4q3/8 b - - 0 1")
+            engine.load_fen("4kb1r/pp2ppp1/3p4/7p/P7/8/2r5/K2Qq3 b - - 7 52")
         {
             eprintln!("{err}");
             return;
@@ -969,12 +974,23 @@ mod tests {
 
         print_board(&engine.board);
 
-        let mov = engine.best_move(2).unwrap();
+        const N: usize = 5;
+        let mut times = [0; N];
+        let mut mov = Move::new(0, 0, 0, 0);
+
+        for i in 0..N {
+            let start = std::time::Instant::now();
+            mov = engine.best_move(6).unwrap();
+            let elapsed = start.elapsed().as_millis();
+            times[i] = elapsed;
+        }
 
         println!(
-            "{}{}",
+            "Best Move: {}{}    nodes: {}    time: {}ms",
             square::to_string(mov.from),
             square::to_string(mov.to),
+            engine.depth_counter,
+            times.iter().sum::<u128>() / N as u128,
         );
     }
 }
